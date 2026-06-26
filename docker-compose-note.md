@@ -2,7 +2,7 @@
 
 ## ভূমিকা: কেন Docker Compose দরকার?
 
-আগের গাইডে আমরা একটা <span style="color:red">Node.js app Dockerize</span> করতে শিখেছি। কিন্তু বাস্তব দুনিয়ায় কোনো application একা চলে না। একটা সাধারণ web application-এ থাকে:
+আগের গাইডে আমরা একটা Node.js app Dockerize করতে শিখেছি। কিন্তু বাস্তব দুনিয়ায় কোনো application একা চলে না। একটা সাধারণ web application-এ থাকে:
 
 - **Node.js API** (backend)
 - **MongoDB** (database)
@@ -44,7 +44,7 @@ docker compose up -d
 docker compose down
 ```
 
-**<h1 color="#0000FF">Docker Compose কী?</h1>**
+**Docker Compose কী?**
 এটা একটা টুল যা দিয়ে **multi-container application** একটা YAML ফাইলে define করে, একটা কমান্ডে সব চালু/বন্ধ করা যায়। এটা YAML ফাইলটা পড়ে সব `docker run`, `docker network create`, `docker volume create` কমান্ড নিজেই চালিয়ে দেয়।
 
 ---
