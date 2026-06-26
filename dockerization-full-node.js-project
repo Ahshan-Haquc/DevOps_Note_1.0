@@ -1,0 +1,627 @@
+# Node.js + MongoDB Atlas Dockerization — সম্পূর্ণ গাইড (বাংলা)
+
+## ভূমিকা: Local MongoDB vs MongoDB Atlas
+
+আগের গাইডে আমরা MongoDB-কেও একটা container হিসেবে Compose-এ চালিয়েছিলাম। কিন্তু **MongoDB Atlas** ব্যবহার করলে পুরো চিত্রটা বদলে যায়:
+
+```
+আগের setup (Local MongoDB):
+┌─────────────────────────────────────────┐
+│         Docker Network                  │
+│  ┌──────────────┐   ┌────────────────┐  │
+│  │  Node.js API │──▶│  MongoDB       │  │
+│  │  container   │   │  container     │  │
+│  └──────────────┘   └────────────────┘  │
+└─────────────────────────────────────────┘
+
+এখনকার setup (MongoDB Atlas):
+┌─────────────────────────────────────────┐
+│         Docker Network                  │
+│  ┌──────────────┐                       │
+│  │  Node.js API │──────────────────────────▶ MongoDB Atlas (Cloud ☁️)
+│  │  container   │   MONGODB_URI env var │
+│  └──────────────┘                       │
+└─────────────────────────────────────────┘
+```
+
+Atlas ব্যবহার করলে:
+- **MongoDB container দরকার নেই** → `docker-compose.yml` অনেক সহজ
+- **`depends_on` দরকার নেই** → Atlas সবসময় ready থাকে
+- **Volume দরকার নেই** → Data Atlas-এর cloud-এ থাকে
+- শুধু একটা **connection string** environment variable হিসেবে দিতে হয়
+
+---
+
+## আমরা কী বানাবো?
+
+একটি **Express.js + Mongoose REST API** যেখানে:
+- `GET /` → Welcome message
+- `GET /health` → DB connection status সহ health check
+- `GET /api/users` → MongoDB Atlas থেকে users fetch করা
+- `POST /api/users` → Atlas-এ নতুন user তৈরি করা
+
+---
+
+## প্রজেক্ট স্ট্রাকচার
+
+```
+my-node-atlas-app/
+│
+├── src/
+│   ├── server.js           ← Express app entry point
+│   ├── db.js               ← MongoDB Atlas connection
+│   └── routes/
+│       └── users.js        ← User routes
+│
+├── Dockerfile              ← Production
+├── Dockerfile.dev          ← Development (hot reload)
+├── .dockerignore
+├── docker-compose.yml      ← Development
+├── docker-compose.prod.yml ← Production
+├── .env                    ← Secret values (git-এ না)
+├── .env.example            ← Template (git-এ দিন)
+├── package.json
+└── package-lock.json
+```
+
+---
+
+## Application Code
+
+### `package.json`
+```json
+{
+  "name": "my-node-atlas-app",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^8.0.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
+```
+
+### `src/db.js` — Atlas Connection
+```javascript
+const mongoose = require('mongoose');
+
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI);
+    console.log(`MongoDB Atlas connected: ${conn.connection.host}`);
+  } catch (error) {
+    console.error(`MongoDB Atlas connection error: ${error.message}`);
+    // Connection fail হলে process বন্ধ করে দাও
+    // Docker-এর restart policy নতুন করে চালু করবে
+    process.exit(1);
+  }
+};
+
+module.exports = connectDB;
+```
+
+### `src/server.js`
+```javascript
+const express = require('express');
+const mongoose = require('mongoose');
+const connectDB = require('./db');
+const usersRouter = require('./routes/users');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+
+// Startup-এ Atlas-এ connect করো
+connectDB();
+
+// Routes
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Node.js + MongoDB Atlas API',
+    environment: process.env.NODE_ENV || 'development',
+  });
+});
+
+// Health check — DB connection status সহ
+app.get('/health', (req, res) => {
+  const dbState = mongoose.connection.readyState;
+  // 0: disconnected, 1: connected, 2: connecting, 3: disconnecting
+  const states = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting',
+  };
+
+  res.json({
+    status: dbState === 1 ? 'OK' : 'DEGRADED',
+    database: states[dbState],
+    uptime: process.uptime(),
+  });
+});
+
+app.use('/api/users', usersRouter);
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+```
+
+### `src/routes/users.js`
+```javascript
+const express = require('express');
+const mongoose = require('mongoose');
+const router = express.Router();
+
+// Simple User model
+const userSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const User = mongoose.model('User', userSchema);
+
+// GET all users
+router.get('/', async (req, res) => {
+  try {
+    const users = await User.find().select('-__v');
+    res.json({ success: true, count: users.length, data: users });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST new user
+router.post('/', async (req, res) => {
+  try {
+    const user = await User.create(req.body);
+    res.status(201).json({ success: true, data: user });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+module.exports = router;
+```
+
+---
+
+## `.dockerignore`
+
+```
+# Dependencies
+node_modules
+
+# Git
+.git
+.gitignore
+
+# Environment files — Atlas URI এখানে থাকে, image-এ যাওয়া উচিত না
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Docker files
+Dockerfile
+Dockerfile.*
+docker-compose*.yml
+.dockerignore
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Test
+coverage/
+__tests__/
+*.test.js
+*.spec.js
+```
+
+---
+
+## Production `Dockerfile`
+
+Atlas ব্যবহার করলে Dockerfile আগের Node.js guide-এর মতোই — কোনো পরিবর্তন নেই। MongoDB container না থাকায় connection string শুধু runtime-এ environment variable হিসেবে আসবে।
+
+```dockerfile
+# Production Dockerfile
+
+FROM node:18-alpine
+
+# Security: non-root user
+RUN addgroup --system appgroup && \
+    adduser --system --ingroup appgroup appuser
+
+WORKDIR /app
+
+# Cache optimization: আগে package.json, তারপর বাকি code
+COPY package*.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+# Source code copy
+COPY --chown=appuser:appgroup . .
+
+# Non-root user-এ switch
+USER appuser
+
+EXPOSE 3000
+
+CMD ["node", "src/server.js"]
+```
+
+---
+
+## Development `Dockerfile.dev`
+
+```dockerfile
+# Dockerfile.dev — Development (hot reload)
+
+FROM node:18-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+EXPOSE 3000
+
+# nodemon দিয়ে hot reload
+CMD ["npm", "run", "dev"]
+```
+
+---
+
+## `.env` ফাইল — Atlas Connection String
+
+```env
+# .env  (কখনো git-এ push করবেন না)
+
+# MongoDB Atlas Connection String
+# Atlas Dashboard → Connect → Drivers → Node.js থেকে copy করুন
+MONGODB_URI=mongodb+srv://ahsan:<password>@cluster0.abc123.mongodb.net/myapp?retryWrites=true&w=majority
+
+# App config
+NODE_ENV=development
+PORT=3000
+```
+
+**`.env.example`** (git-এ দিন, actual values ছাড়া):
+```env
+# .env.example
+
+# MongoDB Atlas থেকে connection string নিন:
+# Atlas Dashboard → Your Cluster → Connect → Drivers → Node.js
+MONGODB_URI=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<dbname>?retryWrites=true&w=majority
+
+NODE_ENV=development
+PORT=3000
+```
+
+### Atlas Connection String-এর গঠন
+
+```
+mongodb+srv://ahsan:mypassword@cluster0.abc123.mongodb.net/myapp?retryWrites=true&w=majority
+│            │      │          │                         │     │
+│            │      │          │                         │     └── Query options
+│            │      │          │                         └── Database name
+│            │      │          └── Cluster hostname (Atlas দেয়)
+│            │      └── Password
+│            └── Username
+└── Protocol: SRV record (Atlas always uses this)
+```
+
+---
+
+## `docker-compose.yml` — Development
+
+Atlas ব্যবহারের সবচেয়ে বড় সুবিধা এখানে — MongoDB service নেই, অনেক সহজ:
+
+```yaml
+# docker-compose.yml (Development with MongoDB Atlas)
+
+services:
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: node_api_dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      # Atlas URI — .env ফাইল থেকে নেওয়া হচ্ছে
+      - MONGODB_URI=${MONGODB_URI}
+    volumes:
+      # Hot reload-এর জন্য bind mount
+      - .:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+# MongoDB container নেই!
+# volumes section নেই! (Atlas নিজে data রাখছে)
+# networks section optional (single service, default network যথেষ্ট)
+```
+
+**চালানো:**
+```bash
+docker compose up -d
+docker compose logs -f api
+```
+
+---
+
+## `docker-compose.prod.yml` — Production
+
+```yaml
+# docker-compose.prod.yml (Production with MongoDB Atlas)
+
+services:
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: node_api_prod
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - MONGODB_URI=${MONGODB_URI}
+    restart: unless-stopped
+    # Production-এ healthcheck যোগ করা ভালো অভ্যাস
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+```
+
+**Production চালানো:**
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+---
+
+## MongoDB Atlas-এ যা করতে হবে
+
+### ১. IP Whitelist (Network Access)
+
+Container থেকে Atlas-এ connect করতে Atlas-এর Network Access-এ আপনার server-এর IP allow করতে হবে।
+
+**Atlas Dashboard → Network Access → Add IP Address:**
+
+```
+Development-এ:
+  0.0.0.0/0    → সব IP allow (সহজ, কিন্তু production-এ করবেন না)
+
+Production-এ:
+  203.0.113.45/32   → শুধু আপনার server-এর specific IP
+```
+
+**কেন এটা গুরুত্বপূর্ণ?**
+Container-এর IP dynamic হতে পারে — বিশেষত cloud provider (AWS, DigitalOcean, Railway) ব্যবহার করলে। তাই:
+- Development: `0.0.0.0/0` দিয়ে রাখুন (সহজ)
+- Production: Server-এর static IP দিন অথবা cloud-এর NAT Gateway IP দিন
+
+### ২. Database User তৈরি
+
+**Atlas Dashboard → Database Access → Add New Database User:**
+```
+Username: ahsan
+Password: (strong password — URL encode করে URI-তে ব্যবহার করুন)
+Role: Read and write to any database
+```
+
+**Password-এ special character থাকলে URL encode করতে হবে:**
+```
+@  → %40
+#  → %23
+$  → %24
+%  → %25
+&  → %26
+
+উদাহরণ: password = "my@pass#123"
+URI-তে: mongodb+srv://ahsan:my%40pass%23123@cluster0...
+```
+
+### ৩. Atlas Connection String কোথায় পাবেন
+
+```
+Atlas Dashboard
+  → Your Project
+  → Clusters
+  → আপনার cluster-এর "Connect" button
+  → "Connect your application"
+  → Driver: Node.js, Version: 5.5 or later
+  → Connection string copy করুন
+  → <password> জায়গায় আসল password বসান
+  → <dbname> জায়গায় আপনার database নাম বসান
+```
+
+---
+
+## সাধারণ ভুলগুলো
+
+### ভুল ১: `MONGODB_URI` সরাসরি Dockerfile-এ লেখা
+```dockerfile
+# ❌ ভয়ঙ্কর ভুল — Atlas credentials image-এ bake হয়ে যাবে
+# docker history দিয়ে বা image push করলে সবাই দেখতে পাবে!
+ENV MONGODB_URI=mongodb+srv://ahsan:mypassword@cluster0...
+
+# ✅ সঠিক — runtime-এ environment variable হিসেবে দিন
+# Dockerfile-এ কোনো actual value লিখবেন না
+```
+
+### ভুল ২: `.env` ফাইল git-এ push করা
+```bash
+# ✅ .gitignore-এ আছে কিনা নিশ্চিত করুন
+cat .gitignore | grep .env
+
+# না থাকলে যোগ করুন
+echo ".env" >> .gitignore
+echo ".env.local" >> .gitignore
+
+# ইতিমধ্যে commit হয়ে গেলে
+git rm --cached .env
+git commit -m "Remove .env from tracking"
+```
+
+### ভুল ৩: Connection String-এ `<password>` placeholder রেখে দেওয়া
+```env
+# ❌ Atlas থেকে copy করার পর placeholder না বদলানো
+MONGODB_URI=mongodb+srv://ahsan:<password>@cluster0.abc123.mongodb.net/myapp
+
+# ✅ আসল password বসাতে হবে
+MONGODB_URI=mongodb+srv://ahsan:actualpassword123@cluster0.abc123.mongodb.net/myapp
+```
+
+### ভুল ৪: Atlas IP Whitelist-এ server IP না দেওয়া
+```
+Container চলছে কিন্তু DB connect হচ্ছে না?
+Log-এ দেখবেন:
+  "MongoServerError: bad auth" → Wrong credentials
+  "MongoNetworkError: connect ECONNREFUSED" → IP not whitelisted বা network issue
+
+Solution:
+  Atlas Dashboard → Network Access → Add IP → 0.0.0.0/0 (development-এ)
+```
+
+### ভুল ৫: `mongoose.connect()` এর error handle না করা
+```javascript
+// ❌ ভুল — error হলে server নীরবে চলতে থাকে (DB ছাড়া!)
+mongoose.connect(process.env.MONGODB_URI);
+
+// ✅ সঠিক — error হলে process বন্ধ করো, Docker restart policy কাজ করবে
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI);
+    console.log('Atlas connected!');
+  } catch (error) {
+    console.error('Atlas connection failed:', error.message);
+    process.exit(1);   // Docker restart করবে
+  }
+};
+```
+
+### ভুল ৬: Password-এ Special Character URL Encode না করা
+```env
+# ❌ ভুল — @ থাকলে URI parsing ভুল হয়
+MONGODB_URI=mongodb+srv://ahsan:my@pass@cluster0...
+
+# ✅ সঠিক — @ → %40
+MONGODB_URI=mongodb+srv://ahsan:my%40pass@cluster0...
+```
+
+---
+
+## সম্পূর্ণ Workflow
+
+```bash
+# ── একবারের কাজ (Atlas Setup) ────────────────────────────────────────────
+# ১. Atlas-এ cluster তৈরি করুন (free tier-এ M0 যথেষ্ট)
+# ২. Database user তৈরি করুন (username + strong password)
+# ৩. Network Access-এ 0.0.0.0/0 allow করুন (development)
+# ৪. Connection string copy করুন
+
+# ── প্রজেক্ট সেটআপ ───────────────────────────────────────────────────────
+cp .env.example .env
+# .env ফাইলে MONGODB_URI বসান
+
+# ── Development ──────────────────────────────────────────────────────────
+docker compose up -d
+
+# Atlas connect হয়েছে কিনা দেখুন
+docker compose logs api
+# Output দেখবেন: "MongoDB Atlas connected: cluster0.abc123.mongodb.net"
+
+# Health check করুন
+curl http://localhost:3000/health
+# {"status":"OK","database":"connected","uptime":12.3}
+
+# API test করুন
+curl -X POST http://localhost:3000/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Ahsan","email":"ahsan@example.com"}'
+
+curl http://localhost:3000/api/users
+
+# ── কোনো সমস্যা হলে ──────────────────────────────────────────────────────
+docker compose logs api              # Error message দেখুন
+docker compose exec api sh           # Container-এ ঢুকুন
+# ভিতরে গিয়ে test করতে পারেন:
+# wget -qO- http://localhost:3000/health
+
+# ── শেষে ─────────────────────────────────────────────────────────────────
+docker compose down
+```
+
+---
+
+## Local MongoDB vs Atlas — কখন কোনটা?
+
+| বিষয় | Local MongoDB Container | MongoDB Atlas |
+|---|---|---|
+| Setup | `docker-compose.yml`-এ service যোগ | Connection string শুধু |
+| Compose complexity | বেশি (depends_on, healthcheck, volume) | কম (শুধু env var) |
+| Data location | আপনার machine-এ | AWS cloud-এ |
+| Internet লাগে? | না | হ্যাঁ |
+| Cost | Free | Free tier আছে (512MB) |
+| Production ready | Extra কাজ লাগে | হ্যাঁ, by default |
+| Backup | নিজে করতে হয় | Atlas automatic করে |
+| কখন ব্যবহার | Offline কাজ, custom config | SaaS project, team work |
+
+---
+
+## Quick Reference
+
+```bash
+# Development
+docker compose up -d                    # চালু
+docker compose logs -f api              # Log দেখা
+docker compose down                     # বন্ধ
+
+# Production
+docker compose -f docker-compose.prod.yml up -d --build
+
+# Atlas connection debug
+docker compose exec api sh
+# ভিতরে: node -e "require('./src/db.js')"
+```
+
+**মনে রাখার নিয়ম:**
+```
+Atlas = শুধু একটা MONGODB_URI environment variable
+      = MongoDB container নেই
+      = depends_on নেই
+      = Volume নেই
+      = Compose অনেক সহজ
+
+কিন্তু সতর্কতা:
+  URI সবসময় .env-এ রাখুন
+  .env কখনো git-এ দেবেন না
+  Atlas IP Whitelist ভুলবেন না
+```
