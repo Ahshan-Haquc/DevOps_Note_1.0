@@ -1,5 +1,8 @@
 # CI/CD with GitHub Actions — VPS-এ Auto Deploy (বাংলা)
 
+## Tutorial link
+https://www.youtube.com/watch?v=LQEYDJSyW8M&list=LL&index=1&t=588s
+
 ## ভূমিকা: CI/CD মানে কী?
 
 আগের গাইডে আমরা manually deploy করেছিলাম:
