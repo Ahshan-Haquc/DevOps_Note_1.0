@@ -199,7 +199,7 @@ docker run [OPTIONS] IMAGE [COMMAND] [ARG...]
 ---
 
 #### `-d` / `--detach` — Background-এ চালানো
-ব্যাকগ্রাউন্ডে চালানো (terminal লক হবে না)।
+ব্যাকগ্রাউন্ডে চালানো মানে local PC অথবা VPS এর terminal বন্ধ হলেও কন্টেইনারের যে প্রজেক্টর রান হয়েছিল সেটা চলতেই থাকবে
 
 ---
 
